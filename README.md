@@ -29,43 +29,43 @@ The laziest way to shut down your PCThe laziest way to shut down your PC
    ```
 
 5. Flags:
-    - `install`
+   - `install`
 
-      Sets up the application as a Windows service.
+     Sets up the application as a Windows service.
 
-      ```bash
-      ./win-powerctl install
-      ```
+     ```bash
+     ./win-powerctl install
+     ```
 
-    - `uninstall`
+   - `uninstall`
 
-      Removes the application from the system as a service.
+     Removes the application from the system as a service.
 
-      ```bash
-      ./win-powerctl uninstall
-      ```
+     ```bash
+     ./win-powerctl uninstall
+     ```
 
-    - `service`
+   - `service`
 
-      Runs the application in service mode.
+     Runs the application in service mode.
 
-      ```bash
-      ./win-powerctl service
-      ```
+     ```bash
+     ./win-powerctl service
+     ```
 
 6. API Endpoints:
-    - `GET /shutdown`
+   - `GET /shutdown`
 
-      Triggers a graceful system shutdown.
+     Triggers a graceful system shutdown.
 
-      ```bash
-      curl http://localhost:10125/shutdown
-      ```
+     ```bash
+     curl http://localhost:10125/shutdown
+     ```
 
-    - `GET /health`
+   - `GET /health`
 
-      Checks the application's health status.
+     Checks the application's health status.
 
-      ```bash
-      curl http://localhost:10125/health
-      ```
+     ```bash
+     curl http://localhost:10125/health
+     ```
