@@ -78,17 +78,17 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 	}
 
 	r.Get("/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := w.Write([]byte("Graceful shutdown initiated")); err != nil {
+			log.Println("write response error:", err)
+			return
+		}
+
 		go func() {
 			watchdog.Start(60 * time.Second)
-
 			if err := shutdown.Graceful(); err != nil {
 				log.Println("graceful shutdown error:", err)
 			}
 		}()
-
-		if _, err := w.Write([]byte("Graceful shutdown initiated")); err != nil {
-			log.Println("write response error:", err)
-		}
 	})
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -106,11 +106,15 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Println("http shutdown error:", err)
 		}
+		close(errCh)
 	}()
 
 	log.Println("Listening on :10125")
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		errCh <- err
+		select {
+		case errCh <- err:
+		default:
+		}
 	}
 }
 
@@ -237,6 +241,34 @@ const (
 	NetFwIpProtocolAny = 256
 )
 
+func withFwPolicy2(f func(policy *ole.IDispatch, rules *ole.IDispatch) error) error {
+	if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
+		return fmt.Errorf("initialize COM: %w", err)
+	}
+	defer ole.CoUninitialize()
+
+	policyObj, err := oleutil.CreateObject("HNetCfg.FwPolicy2")
+	if err != nil {
+		return fmt.Errorf("create FwPolicy2: %w", err)
+	}
+	defer policyObj.Release()
+
+	policy, err := policyObj.QueryInterface(ole.IID_IDispatch)
+	if err != nil {
+		return fmt.Errorf("query IDispatch: %w", err)
+	}
+	defer policy.Release()
+
+	rulesRaw, err := oleutil.GetProperty(policy, "Rules")
+	if err != nil {
+		return fmt.Errorf("get Rules: %w", err)
+	}
+	rules := rulesRaw.ToIDispatch()
+	defer rules.Release()
+
+	return f(policy, rules)
+}
+
 func installService() {
 	exe, err := os.Executable()
 	if err != nil {
@@ -330,105 +362,60 @@ func uninstallService() {
 }
 
 func excludeFromFirewall() error {
-	if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
-		return err
-	}
-	defer ole.CoUninitialize()
-
-	policyObj, err := oleutil.CreateObject("HNetCfg.FwPolicy2")
-	if err != nil {
-		return fmt.Errorf("create FwPolicy2: %w", err)
-	}
-	defer policyObj.Release()
-
-	policy, err := policyObj.QueryInterface(ole.IID_IDispatch)
-	if err != nil {
-		return fmt.Errorf("query FwPolicy2 IDispatch: %w", err)
-	}
-	defer policy.Release()
-
-	rulesRaw := oleutil.MustGetProperty(policy, "Rules")
-	rules := rulesRaw.ToIDispatch()
-	defer rules.Release()
-
 	appPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve executable path: %w", err)
 	}
 
-	_, _ = oleutil.CallMethod(rules, "Remove", firewallName)
+	return withFwPolicy2(func(policy, rules *ole.IDispatch) error {
+		_, _ = oleutil.CallMethod(rules, "Remove", firewallName)
 
-	ruleObj, err := oleutil.CreateObject("HNetCfg.FWRule")
-	if err != nil {
-		return fmt.Errorf("create FWRule: %w", err)
-	}
-	defer ruleObj.Release()
+		ruleObj, err := oleutil.CreateObject("HNetCfg.FWRule")
+		if err != nil {
+			return fmt.Errorf("create FWRule: %w", err)
+		}
+		defer ruleObj.Release()
 
-	rule, err := ruleObj.QueryInterface(ole.IID_IDispatch)
-	if err != nil {
-		return fmt.Errorf("query FWRule IDispatch: %w", err)
-	}
-	defer rule.Release()
+		rule, err := ruleObj.QueryInterface(ole.IID_IDispatch)
+		if err != nil {
+			return fmt.Errorf("query FWRule IDispatch: %w", err)
+		}
+		defer rule.Release()
 
-	if _, err = oleutil.PutProperty(rule, "Name", firewallName); err != nil {
-		return err
-	}
-	if _, err = oleutil.PutProperty(rule, "ApplicationName", appPath); err != nil {
-		return err
-	}
-	if _, err = oleutil.PutProperty(rule, "Action", NetFwActionAllow); err != nil {
-		return err
-	}
-	if _, err = oleutil.PutProperty(rule, "Direction", NetFwRuleDirIn); err != nil {
-		return err
-	}
-	if _, err = oleutil.PutProperty(rule, "Enabled", true); err != nil {
-		return err
-	}
-	if _, err = oleutil.PutProperty(rule, "Profiles", NetFwProfileAll); err != nil {
-		return err
-	}
-	if _, err = oleutil.PutProperty(rule, "Protocol", NetFwIpProtocolAny); err != nil {
-		return err
-	}
-
-	if _, err = oleutil.CallMethod(rules, "Add", rule); err != nil {
-		return fmt.Errorf("add firewall rule: %w", err)
-	}
-
-	return nil
+		if _, err = oleutil.PutProperty(rule, "Name", firewallName); err != nil {
+			return err
+		}
+		if _, err = oleutil.PutProperty(rule, "ApplicationName", appPath); err != nil {
+			return err
+		}
+		if _, err = oleutil.PutProperty(rule, "Action", NetFwActionAllow); err != nil {
+			return err
+		}
+		if _, err = oleutil.PutProperty(rule, "Direction", NetFwRuleDirIn); err != nil {
+			return err
+		}
+		if _, err = oleutil.PutProperty(rule, "Enabled", true); err != nil {
+			return err
+		}
+		if _, err = oleutil.PutProperty(rule, "Profiles", NetFwProfileAll); err != nil {
+			return err
+		}
+		if _, err = oleutil.PutProperty(rule, "Protocol", NetFwIpProtocolAny); err != nil {
+			return err
+		}
+		if _, err = oleutil.CallMethod(rules, "Add", rule); err != nil {
+			return fmt.Errorf("add firewall rule: %w", err)
+		}
+		return nil
+	})
 }
 
 func removeFirewallRule() error {
-	if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
-		return fmt.Errorf("initialize COM: %w", err)
-	}
-	defer ole.CoUninitialize()
-
-	policyObj, err := oleutil.CreateObject("HNetCfg.FwPolicy2")
-	if err != nil {
-		return fmt.Errorf("create FwPolicy2: %w", err)
-	}
-	defer policyObj.Release()
-
-	policy, err := policyObj.QueryInterface(ole.IID_IDispatch)
-	if err != nil {
-		return fmt.Errorf("query IDispatch: %w", err)
-	}
-	defer policy.Release()
-
-	rulesRaw, err := oleutil.GetProperty(policy, "Rules")
-	if err != nil {
-		return fmt.Errorf("get Rules collection: %w", err)
-	}
-
-	rules := rulesRaw.ToIDispatch()
-	defer rules.Release()
-
-	_, err = oleutil.CallMethod(rules, "Remove", firewallName)
-	if err != nil {
-		return fmt.Errorf("firewall rule not found")
-	}
-
-	return nil
+	return withFwPolicy2(func(policy, rules *ole.IDispatch) error {
+		_, err := oleutil.CallMethod(rules, "Remove", firewallName)
+		if err != nil {
+			return fmt.Errorf("firewall rule not found")
+		}
+		return nil
+	})
 }
