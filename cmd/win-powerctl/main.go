@@ -23,6 +23,8 @@ import (
 
 const (
 	serviceName = "winpowerctl"
+	host        = "0.0.0.0"
+	port        = 10125
 )
 
 var rootCmd = &cobra.Command{
@@ -73,7 +75,7 @@ func main() {
 func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 	r := chi.NewRouter()
 	srv := &http.Server{
-		Addr:    ":10125",
+		Addr:    fmt.Sprintf("%s:%d", host, port),
 		Handler: r,
 	}
 
@@ -109,7 +111,7 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 		close(errCh)
 	}()
 
-	log.Println("Listening on :10125")
+	log.Printf("Listening on %s:%d", host, port)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		select {
 		case errCh <- err:
