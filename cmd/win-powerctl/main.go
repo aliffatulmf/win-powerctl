@@ -73,7 +73,7 @@ func main() {
 }
 
 func runHTTP(stop <-chan struct{}, errCh chan<- error) {
-	r := chi.NewRouter()
+	r := chi.NewMux()
 	srv := &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", host, port),
 		Handler: r,
