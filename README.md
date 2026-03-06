@@ -1,6 +1,6 @@
 # win-powerctl
 
-The laziest way to shut down your PCThe laziest way to shut down your PC
+The laziest way to shut down your PC.
 
 ## Usage
 
