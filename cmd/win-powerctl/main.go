@@ -18,7 +18,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"win-powerctl/internal/shutdown"
-	"win-powerctl/internal/watchdog"
+	"win-powerctl/internal/timeout"
 )
 
 const (
@@ -86,7 +86,9 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 		}
 
 		go func() {
-			watchdog.Start(60 * time.Second)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			timeout.Start(ctx, 60*time.Second)
 			if err := shutdown.Graceful(); err != nil {
 				log.Println("graceful shutdown error:", err)
 			}
