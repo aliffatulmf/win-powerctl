@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,6 +20,7 @@ import (
 
 	"win-powerctl/internal/shutdown"
 	"win-powerctl/internal/timeout"
+	"win-powerctl/internal/logger"
 )
 
 const (
@@ -80,7 +80,7 @@ func main() {
 	)
 
 	if err := rootCmd.Execute(); err != nil {
-		log.Fatalf("command execution failed: %v", err)
+		logger.Fatal("main", "command execution failed", "error", err)
 	}
 }
 
@@ -93,7 +93,7 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 
 	r.Get("/shutdown", func(w http.ResponseWriter, r *http.Request) {
 		if _, err := w.Write([]byte("Graceful shutdown initiated")); err != nil {
-			log.Println("write response error:", err)
+			logger.Error("http", "write response error", "error", err)
 			return
 		}
 
@@ -102,7 +102,7 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 			defer cancel()
 			timeout.Start(ctx, 60*time.Second)
 			if err := shutdown.Graceful(); err != nil {
-				log.Println("graceful shutdown error:", err)
+				logger.Error("shutdown", "graceful shutdown error", "error", err)
 			}
 		}()
 	})
@@ -110,7 +110,7 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("OK")); err != nil {
-			log.Println("write response error:", err)
+			logger.Error("http", "write response error", "error", err)
 		}
 	})
 
@@ -120,12 +120,12 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 		defer cancel()
 
 		if err := srv.Shutdown(ctx); err != nil {
-			log.Println("http shutdown error:", err)
+			logger.Error("http", "http shutdown error", "error", err)
 		}
 		close(errCh)
 	}()
 
-	log.Printf("Listening on %s:%d", host, port)
+	logger.Info("http", "Listening", "host", host, "port", port)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		select {
 		case errCh <- err:
@@ -167,7 +167,7 @@ func (m *winsvc) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.St
 			default:
 			}
 		case err := <-httpErr:
-			log.Println("http server error:", err)
+			logger.Error("service", "http server error", "error", err)
 			s <- svc.Status{State: svc.StopPending}
 			close(stopHTTP)
 			return false, 1
@@ -177,7 +177,7 @@ func (m *winsvc) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.St
 
 func runService() {
 	if err := svc.Run(serviceName, &winsvc{}); err != nil {
-		log.Fatalf("service failed: %v", err)
+		logger.Fatal("service", "service failed", "error", err)
 	}
 }
 
@@ -199,7 +199,7 @@ func stopService(serviceName string, timeout time.Duration) error {
 	}
 	defer func() {
 		if err := m.Disconnect(); err != nil {
-			log.Println("SCM disconnect error:", err)
+			logger.Warn("stopService", "SCM disconnect error", "error", err)
 		}
 	}()
 
@@ -209,7 +209,7 @@ func stopService(serviceName string, timeout time.Duration) error {
 	}
 	defer func() {
 		if err := s.Close(); err != nil {
-			log.Println("service close error:", err)
+			logger.Warn("stopService", "service close error", "error", err)
 		}
 	}()
 
@@ -288,25 +288,25 @@ func withFwPolicy2(f func(policy *ole.IDispatch, rules *ole.IDispatch) error) er
 func installService() {
 	exe, err := os.Executable()
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("install", "resolve executable", "error", err)
 	}
 
 	m, err := mgr.Connect()
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("install", "connect to SCM", "error", err)
 	}
 	defer func() {
 		if err := m.Disconnect(); err != nil {
-			log.Println("SCM disconnect error:", err)
+			logger.Warn("install", "SCM disconnect error", "error", err)
 		}
 	}()
 
 	s, err := m.OpenService(serviceName)
 	if err == nil {
 		if err := s.Close(); err != nil {
-			log.Println("service close error:", err)
+			logger.Warn("install", "service close error", "error", err)
 		}
-		log.Println("service already installed")
+		logger.Info("install", "service already installed")
 		return
 	}
 
@@ -315,65 +315,65 @@ func installService() {
 		StartType:   mgr.StartAutomatic,
 	})
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("install", "create service", "error", err)
 	}
 	defer func() {
 		if err := s.Close(); err != nil {
-			log.Println("service close error:", err)
+			logger.Warn("install", "service close error", "error", err)
 		}
 	}()
 
-	log.Println("service installed")
+	logger.Info("install", "service installed")
 
 	if err := runServiceSC(); err != nil {
-		log.Printf("failed to start service: %v", err)
+		logger.Error("install", "failed to start service", "error", err)
 	}
 
-	log.Println("service started")
+	logger.Info("install", "service started")
 
 	if err := excludeFromFirewall(); err != nil {
-		log.Printf("failed to exclude from firewall: %v", err)
+		logger.Error("install", "failed to exclude from firewall", "error", err)
 	}
 
-	log.Println("firewall rule added")
+	logger.Info("install", "firewall rule added")
 }
 
 func uninstallService() {
 	m, err := mgr.Connect()
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("uninstall", "connect to SCM", "error", err)
 	}
 	defer func() {
 		if err := m.Disconnect(); err != nil {
-			log.Println("SCM disconnect error:", err)
+			logger.Warn("uninstall", "SCM disconnect error", "error", err)
 		}
 	}()
 
 	s, err := m.OpenService(serviceName)
 	if err != nil {
-		log.Fatal("service not installed")
+		logger.Fatal("uninstall", "service not installed")
 	}
 	defer func() {
 		if err := s.Close(); err != nil {
-			log.Println("service close error:", err)
+			logger.Warn("uninstall", "service close error", "error", err)
 		}
 	}()
 
 	if err := stopService(serviceName, 10*time.Second); err != nil {
-		log.Printf("failed to stop service: %v", err)
+		logger.Error("uninstall", "failed to stop service", "error", err)
 	} else {
-		log.Println("service stopped")
+		logger.Info("uninstall", "service stopped")
 	}
 	if err := s.Delete(); err != nil {
-		log.Fatal(err)
+		logger.Fatal("uninstall", "delete service", "error", err)
 	}
 
-	log.Println("service deleted")
+	logger.Info("uninstall", "service deleted")
 
 	if err := removeFirewallRule(); err != nil {
-		log.Println("failed to remove firewall rule")
+		logger.Error("uninstall", "failed to remove firewall rule")
 	} else {
-		log.Println("firewall rule removed")
+		logger.Info("uninstall", "firewall rule removed")
 	}
 }
 
