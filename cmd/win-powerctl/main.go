@@ -28,15 +28,19 @@ const (
 	serviceName = "winpowerctl"
 	host        = "0.0.0.0"
 	port        = 10125
+	version     = "1.0.0"
 )
 
-var rootCmd = &cobra.Command{
-	Use:   "win-powerctl",
-	Short: "Win Power Control Service",
-	CompletionOptions: cobra.CompletionOptions{
-		DisableDefaultCmd: true,
-	},
-}
+var (
+	versionFlag bool
+	rootCmd     = &cobra.Command{
+		Use:   "win-powerctl",
+		Short: "Win Power Control Service",
+		CompletionOptions: cobra.CompletionOptions{
+			DisableDefaultCmd: true,
+		},
+	}
+)
 
 func main() {
 	isService, err := svc.IsWindowsService()
@@ -44,6 +48,8 @@ func main() {
 		runService()
 		return
 	}
+
+	rootCmd.Flags().BoolVar(&versionFlag, "version", false, "Print version and exit")
 
 	rootCmd.AddCommand(
 		&cobra.Command{
@@ -69,6 +75,14 @@ func main() {
 			Hidden: true,
 		},
 	)
+
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		// Only trigger for root command, not subcommands
+		if cmd == rootCmd && versionFlag {
+			fmt.Printf("win-powerctl version %s\n", version)
+			os.Exit(0)
+		}
+	}
 
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatalf("command execution failed: %v", err)
