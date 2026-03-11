@@ -18,9 +18,9 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	"win-powerctl/internal/logger"
 	"win-powerctl/internal/shutdown"
 	"win-powerctl/internal/timeout"
-	"win-powerctl/internal/logger"
 )
 
 const (
@@ -42,7 +42,10 @@ var (
 
 func main() {
 	isService, err := svc.IsWindowsService()
-	if err == nil && isService {
+	if err != nil {
+		logger.Fatal("main", "failed to check Windows service", "error", err)
+	}
+	if isService {
 		runService()
 		return
 	}
@@ -94,6 +97,7 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 	r.Get("/shutdown", func(w http.ResponseWriter, r *http.Request) {
 		if _, err := w.Write([]byte("Graceful shutdown initiated")); err != nil {
 			logger.Error("http", "write response error", "error", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 
@@ -111,6 +115,7 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("OK")); err != nil {
 			logger.Error("http", "write response error", "error", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	})
 
@@ -127,6 +132,7 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 
 	logger.Info("http", "Listening", "host", host, "port", port)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Error("http", "ListenAndServe failed", "error", err)
 		select {
 		case errCh <- err:
 		default:
