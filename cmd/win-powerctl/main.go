@@ -1,5 +1,4 @@
 //go:build windows
-// +build windows
 
 package main
 
@@ -32,8 +31,7 @@ const (
 )
 
 var (
-	versionFlag bool
-	rootCmd     = &cobra.Command{
+	rootCmd = &cobra.Command{
 		Use:   "win-powerctl",
 		Short: "Win Power Control Service",
 		CompletionOptions: cobra.CompletionOptions{
@@ -48,8 +46,6 @@ func main() {
 		runService()
 		return
 	}
-
-	rootCmd.Flags().BoolVar(&versionFlag, "version", false, "Print version and exit")
 
 	rootCmd.AddCommand(
 		&cobra.Command{
@@ -74,15 +70,14 @@ func main() {
 			},
 			Hidden: true,
 		},
+		&cobra.Command{
+			Use:   "version",
+			Short: "Print version and exit",
+			Run: func(cmd *cobra.Command, args []string) {
+				fmt.Printf("win-powerctl version %s\n", version)
+			},
+		},
 	)
-
-	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
-		// Only trigger for root command, not subcommands
-		if cmd == rootCmd && versionFlag {
-			fmt.Printf("win-powerctl version %s\n", version)
-			os.Exit(0)
-		}
-	}
 
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatalf("command execution failed: %v", err)
