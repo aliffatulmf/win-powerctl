@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"win-powerctl/internal/admin"
+	"win-powerctl/internal/auth"
 	"win-powerctl/internal/logger"
 	"win-powerctl/internal/shutdown"
 	"win-powerctl/internal/timeout"
@@ -113,6 +114,30 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 			http.Error(w, "Administrator privileges required", http.StatusForbidden)
 			return
 		}
+
+		authParam := r.URL.Query().Get("auth")
+		password, err := auth.ReadPassword()
+		if err != nil {
+			if errors.Is(err, auth.ErrPasswordFileMissing) {
+				logger.Warn("http", "password file missing or unreadable")
+				http.Error(w, "Authentication file missing", http.StatusInternalServerError)
+				return
+			}
+			if errors.Is(err, auth.ErrPasswordEmpty) {
+				logger.Warn("http", "password file empty")
+				http.Error(w, "Authentication file empty", http.StatusInternalServerError)
+				return
+			}
+			logger.Warn("http", "password read error", "error", err)
+			http.Error(w, "Authentication error", http.StatusInternalServerError)
+			return
+		}
+		if authParam != password {
+			logger.Warn("http", "shutdown request denied: invalid password")
+			http.Error(w, "Invalid authentication", http.StatusUnauthorized)
+			return
+		}
+
 		if _, err := w.Write([]byte("Graceful shutdown initiated")); err != nil {
 			logger.Error("http", "write response error", "error", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
