@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -39,6 +40,7 @@ var (
 			DisableDefaultCmd: true,
 		},
 	}
+	shutdownOnce sync.Once
 )
 
 func main() {
@@ -117,14 +119,18 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 			return
 		}
 
-		go func() {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			timeout.Start(ctx, 60*time.Second)
-			if err := shutdown.Graceful(); err != nil {
-				logger.Error("shutdown", "graceful shutdown error", "error", err)
-			}
-		}()
+		shutdownOnce.Do(func() {
+			go func() {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				timeout.Start(ctx, 60*time.Second)
+
+				if err := shutdown.Graceful(); err != nil {
+					logger.Error("shutdown", "graceful shutdown error", "error", err)
+				}
+			}()
+		})
 	})
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -158,12 +164,13 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 
 type winsvc struct{}
 
-func (m *winsvc) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.Status) (bool, uint32) {
+func (m *winsvc) Execute(args []string, r <-chan svc.ChangeRequest, s chan<- svc.Status) (bool, uint32) {
 	const accepted = svc.AcceptStop | svc.AcceptShutdown
 	s <- svc.Status{State: svc.StartPending}
 
 	stopHTTP := make(chan struct{})
 	httpErr := make(chan error, 1)
+	httpErrSent := false
 
 	go func() {
 		runHTTP(stopHTTP, httpErr)
@@ -189,10 +196,13 @@ func (m *winsvc) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.St
 			default:
 			}
 		case err := <-httpErr:
-			logger.Error("service", "http server error", "error", err)
-			s <- svc.Status{State: svc.StopPending}
-			close(stopHTTP)
-			return false, 1
+			if !httpErrSent {
+				logger.Error("service", "http server error", "error", err)
+				s <- svc.Status{State: svc.StopPending}
+				close(stopHTTP)
+				httpErrSent = true
+				return false, 1
+			}
 		}
 	}
 }
@@ -393,7 +403,7 @@ func uninstallService() {
 	logger.Info("uninstall", "service deleted")
 
 	if err := removeFirewallRule(); err != nil {
-		logger.Error("uninstall", "failed to remove firewall rule")
+		logger.Error("uninstall", "failed to remove firewall rule", "error", err)
 	} else {
 		logger.Info("uninstall", "firewall rule removed")
 	}

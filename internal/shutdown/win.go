@@ -59,6 +59,7 @@ func enablePrivilege() error {
 	if r1 == 0 {
 		return err
 	}
+	defer syscall.CloseHandle(syscall.Handle(token))
 
 	var luid LUID
 	namePtr, err := syscall.UTF16PtrFromString(SeShutdownName)
