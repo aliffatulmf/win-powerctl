@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	"win-powerctl/internal/admin"
 	"win-powerctl/internal/logger"
 	"win-powerctl/internal/shutdown"
 	"win-powerctl/internal/timeout"
@@ -55,6 +56,11 @@ func main() {
 			Use:   "install",
 			Short: "Install Windows service",
 			Run: func(cmd *cobra.Command, args []string) {
+				if !admin.IsElevated() {
+					logger.Warn("cli", "install denied: not admin")
+					fmt.Fprintln(os.Stderr, "Administrator privileges required for install")
+					os.Exit(1)
+				}
 				installService()
 			},
 		},
@@ -62,6 +68,11 @@ func main() {
 			Use:   "uninstall",
 			Short: "Uninstall Windows service",
 			Run: func(cmd *cobra.Command, args []string) {
+				if !admin.IsElevated() {
+					logger.Warn("cli", "uninstall denied: not admin")
+					fmt.Fprintln(os.Stderr, "Administrator privileges required for uninstall")
+					os.Exit(1)
+				}
 				uninstallService()
 			},
 		},
@@ -95,6 +106,11 @@ func runHTTP(stop <-chan struct{}, errCh chan<- error) {
 	}
 
 	r.Get("/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		if !admin.IsElevated() {
+			logger.Warn("http", "shutdown request denied: not admin")
+			http.Error(w, "Administrator privileges required", http.StatusForbidden)
+			return
+		}
 		if _, err := w.Write([]byte("Graceful shutdown initiated")); err != nil {
 			logger.Error("http", "write response error", "error", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
