@@ -26,6 +26,9 @@ var cfg *config.Config
 var rootCmd = &cobra.Command{
 	Use:   "win-powerctl",
 	Short: "HTTP service for remote system power control",
+	CompletionOptions: cobra.CompletionOptions{
+		DisableDefaultCmd: true,
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		logger.Info().Str("host", cfg.Host).Int("port", cfg.Port).Msg("starting server")
 		s := server.New(cfg)
