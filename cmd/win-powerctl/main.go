@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
 	"win-powerctl/internal/config"
@@ -20,47 +21,105 @@ const (
 	version     = "1.0.0"
 )
 
-func main() {
-	logger.Init()
-	cfg := config.Load("config.ini")
+var cfg *config.Config
 
-	if len(os.Args) < 2 {
+var rootCmd = &cobra.Command{
+	Use:   "win-powerctl",
+	Short: "HTTP service for remote system power control",
+	RunE: func(cmd *cobra.Command, args []string) error {
 		logger.Info().Str("host", cfg.Host).Int("port", cfg.Port).Msg("starting server")
 		s := server.New(cfg)
 		s.SetShutdown(poweroff.Graceful)
 		s.SetCheckDLL(poweroff.CheckDLL)
 		service.Run(serviceName, s)
-		return
-	}
+		return nil
+	},
+}
 
-	logger.Info().Str("command", os.Args[1]).Msg("command received")
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print version",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("win-powerctl %s\n", version)
+	},
+}
 
-	switch os.Args[1] {
-	case "install":
+var installCmd = &cobra.Command{
+	Use:   "install",
+	Short: "Install as Windows service",
+	Run: func(cmd *cobra.Command, args []string) {
 		requireAdmin()
 		service.Install(serviceName)
-	case "uninstall":
+	},
+}
+
+var uninstallCmd = &cobra.Command{
+	Use:   "uninstall",
+	Short: "Remove from Windows services",
+	Run: func(cmd *cobra.Command, args []string) {
 		requireAdmin()
 		service.Uninstall(serviceName)
-	case "start":
+	},
+}
+
+var startCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start the service",
+	Run: func(cmd *cobra.Command, args []string) {
 		requireAdmin()
 		service.Start(serviceName)
-	case "stop":
+	},
+}
+
+var stopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the service",
+	Run: func(cmd *cobra.Command, args []string) {
 		requireAdmin()
 		service.Stop(serviceName)
-	case "restart":
+	},
+}
+
+var restartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Restart the service",
+	Run: func(cmd *cobra.Command, args []string) {
 		requireAdmin()
 		service.Restart(serviceName)
-	case "service":
+	},
+}
+
+var serviceCmd = &cobra.Command{
+	Use:    "service",
+	Short:  "Run as Windows service",
+	Hidden: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		s := server.New(cfg)
 		s.SetShutdown(poweroff.Graceful)
 		s.SetCheckDLL(poweroff.CheckDLL)
 		service.Run(serviceName, s)
-	case "version":
-		fmt.Printf("win-powerctl %s\n", version)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
-		fmt.Fprintln(os.Stderr, "usage: win-powerctl [install|uninstall|start|stop|restart|service|version]")
+		return nil
+	},
+}
+
+func init() {
+	cfg = config.Load("config.ini")
+
+	rootCmd.AddCommand(
+		versionCmd,
+		installCmd,
+		uninstallCmd,
+		startCmd,
+		stopCmd,
+		restartCmd,
+		serviceCmd,
+	)
+}
+
+func main() {
+	logger.Init()
+
+	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
