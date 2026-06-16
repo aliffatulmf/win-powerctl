@@ -1,14 +1,12 @@
 /**
- * poweroff.c - Windows shutdown library
+ * poweroff.c - Windows Shutdown Library
  *
- * Shared library providing shutdown/restart functions for Windows.
- * Used by win-powerctl via syscall DLL loading.
+ * Provides programmatic control over system power states (shutdown, reboot,
+ * power off) with internal privilege escalation and dry-run validation.
  *
- * Build (MSVC):
- *   cl /LD poweroff.c /link /OUT:poweroff.dll advapi32.lib user32.lib
- *
- * Build (MinGW):
- *   gcc -shared -o poweroff.dll poweroff.c -ladvapi32 -luser32
+ * Compilation:
+ *   MSVC  : cl /LD poweroff.c /link /OUT:poweroff.dll advapi32.lib user32.lib
+ *   MinGW : gcc -shared -o poweroff.dll poweroff.c -ladvapi32 -luser32
  */
 
 #ifndef POWEROFF_C
@@ -16,115 +14,127 @@
 
 #include <windows.h>
 
-/* ----- Shutdown flags ----- */
-
-#define EXIT_WINDOWS_GRACEFUL  0x00000001
-#define EXIT_WINDOWS_REBOOT    0x00000002
-#define EXIT_WINDOWS_FORCE     0x00000004
-#define EXIT_WINDOWS_POWEROFF  0x00000008
-#define EXIT_WINDOWS_FORCEHUNG 0x00000010
-
-#define SHUTDOWN_REASON_PLANNED 0x80000000
-
-/* ----- Internal helpers ----- */
-
 /**
- * enable_shutdown_privilege - Enable SeShutdownPrivilege for current process.
- * Returns TRUE on success, FALSE on failure.
+ * Enables the SeShutdownPrivilege for the current process token.
+ *
+ * @return TRUE if the privilege was successfully enabled, FALSE otherwise.
+ *         Call GetLastError() for extended error information.
  */
-static BOOL enable_shutdown_privilege(void) {
+static BOOL enable_shutdown_privilege(void)
+{
     HANDLE token;
-    if (!OpenProcessToken(GetCurrentProcess(),
-        TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
-        return FALSE;
-
     LUID luid;
-    if (!LookupPrivilegeValueW(NULL, L"SeShutdownPrivilege", &luid)) {
+    TOKEN_PRIVILEGES tp;
+    BOOL ok;
+    DWORD err;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
+    {
+        return FALSE;
+    }
+
+    /* Use hardcode wide-string to ensure compatibility across all Windows SDK versions */
+    if (!LookupPrivilegeValueW(NULL, L"SeShutdownPrivilege", &luid))
+    {
         CloseHandle(token);
         return FALSE;
     }
 
-    TOKEN_PRIVILEGES tp;
     tp.PrivilegeCount = 1;
     tp.Privileges[0].Luid = luid;
     tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 
-    BOOL ok = AdjustTokenPrivileges(token, FALSE, &tp, 0, NULL, NULL);
-    DWORD err = GetLastError();
+    ok = AdjustTokenPrivileges(token, FALSE, &tp, 0, NULL, NULL);
+    err = GetLastError();
     CloseHandle(token);
+
+    /* AdjustTokenPrivileges returns TRUE even if not all privileges are assigned. */
     return ok && err != ERROR_NOT_ALL_ASSIGNED;
 }
 
-/* ----- Exported functions ----- */
-
 /**
- * EnableShutdownPrivilege - Exported wrapper for privilege enablement.
- * Returns TRUE on success, FALSE on failure.
- */
-__declspec(dllexport) BOOL EnableShutdownPrivilege(void) {
-    return enable_shutdown_privilege();
-}
-
-/**
- * ShutdownGraceful - Initiate graceful shutdown.
+ * Internal worker to handle privilege acquisition and system shutdown execution.
  *
- * @param dry_run  If non-zero, performs all checks but does not
- *                 actually call ExitWindowsEx. Useful for testing.
- * @return TRUE on success (or dry-run), FALSE on failure.
+ * @param flags    The ExitWindowsEx action flags (e.g., EWX_SHUTDOWN, EWX_REBOOT).
+ * @param dry_run  If TRUE, validates privileges without initiating the shutdown.
+ * @return TRUE on success or successful dry-run, FALSE on failure.
  */
-__declspec(dllexport) BOOL ShutdownGraceful(BOOL dry_run) {
-    if (dry_run)
-        return TRUE;
+static BOOL do_shutdown(UINT flags, BOOL dry_run)
+{
     if (!enable_shutdown_privilege())
+    {
         return FALSE;
-    return ExitWindowsEx(EXIT_WINDOWS_GRACEFUL, SHUTDOWN_REASON_PLANNED);
+    }
+
+    if (dry_run)
+    {
+        return TRUE;
+    }
+
+    return ExitWindowsEx(flags, SHTDN_REASON_FLAG_PLANNED);
 }
 
-/**
- * ShutdownForce - Initiate forced shutdown (kills hung apps).
- *
- * @param dry_run  If non-zero, performs all checks but does not
- *                 actually call ExitWindowsEx. Useful for testing.
- * @return TRUE on success (or dry-run), FALSE on failure.
- */
-__declspec(dllexport) BOOL ShutdownForce(BOOL dry_run) {
-    if (dry_run)
-        return TRUE;
-    if (!enable_shutdown_privilege())
-        return FALSE;
-    return ExitWindowsEx(
-        EXIT_WINDOWS_GRACEFUL | EXIT_WINDOWS_FORCE | EXIT_WINDOWS_FORCEHUNG,
-        SHUTDOWN_REASON_PLANNED);
-}
+#ifdef __cplusplus
+extern "C"
+{
+#endif
 
-/**
- * ShutdownReboot - Initiate reboot.
- *
- * @param dry_run  If non-zero, performs all checks but does not
- *                 actually call ExitWindowsEx. Useful for testing.
- * @return TRUE on success (or dry-run), FALSE on failure.
- */
-__declspec(dllexport) BOOL ShutdownReboot(BOOL dry_run) {
-    if (dry_run)
-        return TRUE;
-    if (!enable_shutdown_privilege())
-        return FALSE;
-    return ExitWindowsEx(EXIT_WINDOWS_REBOOT | EXIT_WINDOWS_FORCEHUNG, SHUTDOWN_REASON_PLANNED);
-}
+    /**
+     * Enables the shutdown privilege for the calling process.
+     *
+     * @return TRUE on success, FALSE on failure.
+     */
+    __declspec(dllexport) BOOL WINAPI EnableShutdownPrivilege(void)
+    {
+        return enable_shutdown_privilege();
+    }
 
-/**
- * ShutdownPowerOff - Initiate power off.
- *
- * @param dry_run  If non-zero, performs all checks but does not
- *                 actually call ExitWindowsEx. Useful for testing.
- * @return TRUE on success (or dry-run), FALSE on failure.
- */
-__declspec(dllexport) BOOL ShutdownPowerOff(BOOL dry_run) {
-    if (dry_run)
-        return TRUE;
-    if (!enable_shutdown_privilege())
-        return FALSE;
-    return ExitWindowsEx(EXIT_WINDOWS_POWEROFF | EXIT_WINDOWS_FORCEHUNG, SHUTDOWN_REASON_PLANNED);
+    /**
+     * Initiates a graceful system shutdown.
+     *
+     * @param dry_run  If TRUE, performs privilege validation only.
+     * @return TRUE on success, FALSE on failure.
+     */
+    __declspec(dllexport) BOOL WINAPI ShutdownGraceful(BOOL dry_run)
+    {
+        return do_shutdown(EWX_SHUTDOWN, dry_run);
+    }
+
+    /**
+     * Initiates a forced system shutdown, terminating unresponsive applications.
+     *
+     * @param dry_run  If TRUE, performs privilege validation only.
+     * @return TRUE on success, FALSE on failure.
+     */
+    __declspec(dllexport) BOOL WINAPI ShutdownForce(BOOL dry_run)
+    {
+        return do_shutdown(EWX_SHUTDOWN | EWX_FORCE | EWX_FORCEIFHUNG, dry_run);
+    }
+
+    /**
+     * Initiates a system reboot.
+     *
+     * @param dry_run  If TRUE, performs privilege validation only.
+     * @return TRUE on success, FALSE on failure.
+     */
+    __declspec(dllexport) BOOL WINAPI ShutdownReboot(BOOL dry_run)
+    {
+        return do_shutdown(EWX_REBOOT | EWX_FORCEIFHUNG, dry_run);
+    }
+
+    /**
+     * Initiates a system power off.
+     *
+     * @param dry_run  If TRUE, performs privilege validation only.
+     * @return TRUE on success, FALSE on failure.
+     */
+    __declspec(dllexport) BOOL WINAPI ShutdownPowerOff(BOOL dry_run)
+    {
+        return do_shutdown(EWX_POWEROFF | EWX_FORCEIFHUNG, dry_run);
+    }
+
+#ifdef __cplusplus
 }
+#endif
 
 #endif /* POWEROFF_C */
