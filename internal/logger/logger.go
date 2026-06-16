@@ -3,36 +3,32 @@ package logger
 import (
 	"fmt"
 	"os"
-	"strings"
+	"time"
+
+	"github.com/rs/zerolog"
 )
 
-func Info(component, msg string, kv ...any) {
-	fmt.Fprintf(os.Stdout, "[INFO] [%s] %s%s\n", component, msg, formatKV(kv))
-}
+var log zerolog.Logger
 
-func Warn(component, msg string, kv ...any) {
-	fmt.Fprintf(os.Stdout, "[WARN] [%s] %s%s\n", component, msg, formatKV(kv))
-}
+func Init() {
+	os.MkdirAll("logs", 0755)
 
-func Error(component, msg string, kv ...any) {
-	fmt.Fprintf(os.Stderr, "[ERROR] [%s] %s%s\n", component, msg, formatKV(kv))
-}
-
-func Fatal(component, msg string, kv ...any) {
-	fmt.Fprintf(os.Stderr, "[FATAL] [%s] %s%s\n", component, msg, formatKV(kv))
-	os.Exit(1)
-}
-
-func formatKV(kv []any) string {
-	if len(kv) == 0 {
-		return ""
+	filename := fmt.Sprintf("logs/%s.log", time.Now().Format("2006-01-02"))
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open log file: %v\n", err)
+		os.Exit(1)
 	}
-	var out strings.Builder
-	out.WriteString(" |")
-	for i := 0; i < len(kv); i += 2 {
-		if i+1 < len(kv) {
-			fmt.Fprintf(&out, " %v=%v", kv[i], kv[i+1])
-		}
-	}
-	return out.String()
+
+	console := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: "15:04:05"}
+	file := zerolog.ConsoleWriter{Out: f, TimeFormat: "15:04:05", NoColor: true}
+
+	multi := zerolog.MultiLevelWriter(console, file)
+	log = zerolog.New(multi).With().Timestamp().Logger()
 }
+
+func Info() *zerolog.Event  { return log.Info() }
+func Warn() *zerolog.Event  { return log.Warn() }
+func Error() *zerolog.Event { return log.Error() }
+func Fatal() *zerolog.Event { return log.Fatal() }
+func Debug() *zerolog.Event { return log.Debug() }

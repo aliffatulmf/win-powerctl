@@ -1,494 +1,74 @@
-//go:build windows && cgo
+//go:build windows
 
 package main
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"net/http"
 	"os"
-	"os/exec"
-	"sync"
-	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-ole/go-ole"
-	"github.com/go-ole/go-ole/oleutil"
-	"github.com/spf13/cobra"
-	"golang.org/x/sys/windows/svc"
-	"golang.org/x/sys/windows/svc/mgr"
+	"golang.org/x/sys/windows"
 
-	"win-powerctl/internal/admin"
-	"win-powerctl/internal/auth"
+	"win-powerctl/internal/config"
 	"win-powerctl/internal/logger"
-	"win-powerctl/internal/shutdown"
-	"win-powerctl/internal/timeout"
+	"win-powerctl/internal/poweroff"
+	"win-powerctl/internal/server"
+	"win-powerctl/internal/service"
 )
 
 const (
 	serviceName = "winpowerctl"
-	host        = "0.0.0.0"
-	port        = 10125
-	version     = "1.0.0-alpha"
-)
-
-var (
-	rootCmd = &cobra.Command{
-		Use:   "win-powerctl",
-		Short: "Win Power Control Service",
-		CompletionOptions: cobra.CompletionOptions{
-			DisableDefaultCmd: true,
-		},
-	}
-	shutdownOnce sync.Once
+	version     = "1.0.0"
 )
 
 func main() {
-	isService, err := svc.IsWindowsService()
-	if err != nil {
-		logger.Fatal("main", "failed to check Windows service", "error", err)
-	}
-	if isService {
-		runService()
+	logger.Init()
+	cfg := config.Load("config.ini")
+
+	if len(os.Args) < 2 {
+		logger.Info().Str("host", cfg.Host).Int("port", cfg.Port).Msg("starting server")
+		s := server.New(cfg)
+		s.SetShutdown(poweroff.Graceful)
+		s.SetCheckDLL(poweroff.CheckDLL)
+		service.Run(serviceName, s)
 		return
 	}
 
-	rootCmd.AddCommand(
-		&cobra.Command{
-			Use:   "install",
-			Short: "Install Windows service",
-			Run: func(cmd *cobra.Command, args []string) {
-				if !admin.IsElevated() {
-					logger.Warn("cli", "install denied: not admin")
-					fmt.Fprintln(os.Stderr, "Administrator privileges required for install")
-					os.Exit(1)
-				}
-				installService()
-			},
-		},
-		&cobra.Command{
-			Use:   "uninstall",
-			Short: "Uninstall Windows service",
-			Run: func(cmd *cobra.Command, args []string) {
-				if !admin.IsElevated() {
-					logger.Warn("cli", "uninstall denied: not admin")
-					fmt.Fprintln(os.Stderr, "Administrator privileges required for uninstall")
-					os.Exit(1)
-				}
-				uninstallService()
-			},
-		},
-		&cobra.Command{
-			Use:   "service",
-			Short: "Run as Windows service",
-			Run: func(cmd *cobra.Command, args []string) {
-				runService()
-			},
-			Hidden: true,
-		},
-		&cobra.Command{
-			Use:   "version",
-			Short: "Print version and exit",
-			Run: func(cmd *cobra.Command, args []string) {
-				fmt.Printf("win-powerctl version %s\n", version)
-			},
-		},
-	)
+	logger.Info().Str("command", os.Args[1]).Msg("command received")
 
-	if err := rootCmd.Execute(); err != nil {
-		logger.Fatal("main", "command execution failed", "error", err)
+	switch os.Args[1] {
+	case "install":
+		requireAdmin()
+		service.Install(serviceName)
+	case "uninstall":
+		requireAdmin()
+		service.Uninstall(serviceName)
+	case "start":
+		requireAdmin()
+		service.Start(serviceName)
+	case "stop":
+		requireAdmin()
+		service.Stop(serviceName)
+	case "restart":
+		requireAdmin()
+		service.Restart(serviceName)
+	case "service":
+		s := server.New(cfg)
+		s.SetShutdown(poweroff.Graceful)
+		s.SetCheckDLL(poweroff.CheckDLL)
+		service.Run(serviceName, s)
+	case "version":
+		fmt.Printf("win-powerctl %s\n", version)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
+		fmt.Fprintln(os.Stderr, "usage: win-powerctl [install|uninstall|start|stop|restart|service|version]")
+		os.Exit(1)
 	}
 }
 
-func runHTTP(stop <-chan struct{}, errCh chan<- error) {
-	r := chi.NewMux()
-	srv := &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", host, port),
-		Handler: r,
-	}
-
-	r.Get("/shutdown", func(w http.ResponseWriter, r *http.Request) {
-		if !admin.IsElevated() {
-			logger.Warn("http", "shutdown request denied: not admin")
-			http.Error(w, "Administrator privileges required", http.StatusForbidden)
-			return
-		}
-
-		authParam := r.URL.Query().Get("auth")
-		password, err := auth.ReadPassword()
-		if err != nil {
-			if errors.Is(err, auth.ErrPasswordFileMissing) {
-				logger.Warn("http", "password file missing or unreadable")
-				http.Error(w, "Authentication file missing", http.StatusInternalServerError)
-				return
-			}
-			if errors.Is(err, auth.ErrPasswordEmpty) {
-				logger.Warn("http", "password file empty")
-				http.Error(w, "Authentication file empty", http.StatusInternalServerError)
-				return
-			}
-			logger.Warn("http", "password read error", "error", err)
-			http.Error(w, "Authentication error", http.StatusInternalServerError)
-			return
-		}
-		if authParam != password {
-			logger.Warn("http", "shutdown request denied: invalid password")
-			http.Error(w, "Invalid authentication", http.StatusUnauthorized)
-			return
-		}
-
-		if _, err := w.Write([]byte("Graceful shutdown initiated")); err != nil {
-			logger.Error("http", "write response error", "error", err)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-
-		shutdownOnce.Do(func() {
-			go func() {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-
-				timeout.Start(ctx, 60*time.Second)
-
-				if err := shutdown.Graceful(); err != nil {
-					logger.Error("shutdown", "graceful shutdown error", "error", err)
-				}
-			}()
-		})
-	})
-
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write([]byte("OK")); err != nil {
-			logger.Error("http", "write response error", "error", err)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		}
-	})
-
-	go func() {
-		<-stop
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if err := srv.Shutdown(ctx); err != nil {
-			logger.Error("http", "http shutdown error", "error", err)
-		}
-		close(errCh)
-	}()
-
-	logger.Info("http", "Listening", "host", host, "port", port)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("http", "ListenAndServe failed", "error", err)
-		select {
-		case errCh <- err:
-		default:
-		}
-	}
-}
-
-type winsvc struct{}
-
-func (m *winsvc) Execute(args []string, r <-chan svc.ChangeRequest, s chan<- svc.Status) (bool, uint32) {
-	const accepted = svc.AcceptStop | svc.AcceptShutdown
-	s <- svc.Status{State: svc.StartPending}
-
-	stopHTTP := make(chan struct{})
-	httpErr := make(chan error, 1)
-	httpErrSent := false
-
-	go func() {
-		runHTTP(stopHTTP, httpErr)
-	}()
-
-	s <- svc.Status{State: svc.Running, Accepts: accepted}
-
-	for {
-		select {
-		case c, ok := <-r:
-			if !ok {
-				close(stopHTTP)
-				return false, 0
-			}
-
-			switch c.Cmd {
-			case svc.Interrogate:
-				s <- c.CurrentStatus
-			case svc.Stop, svc.Shutdown:
-				s <- svc.Status{State: svc.StopPending}
-				close(stopHTTP)
-				return false, 0
-			default:
-			}
-		case err := <-httpErr:
-			if !httpErrSent {
-				logger.Error("service", "http server error", "error", err)
-				s <- svc.Status{State: svc.StopPending}
-				close(stopHTTP)
-				httpErrSent = true
-				return false, 1
-			}
-		}
-	}
-}
-
-func runService() {
-	if err := svc.Run(serviceName, &winsvc{}); err != nil {
-		logger.Fatal("service", "service failed", "error", err)
-	}
-}
-
-func runServiceSC() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cmd, err := exec.CommandContext(ctx, "sc", "start", serviceName).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("sc start command failed: %w, output: %s", err, cmd)
-	}
-	return nil
-}
-
-func stopService(serviceName string, timeout time.Duration) error {
-	m, err := mgr.Connect()
-	if err != nil {
-		return fmt.Errorf("connect to SCM: %w", err)
-	}
-	defer func() {
-		if err := m.Disconnect(); err != nil {
-			logger.Warn("stopService", "SCM disconnect error", "error", err)
-		}
-	}()
-
-	s, err := m.OpenService(serviceName)
-	if err != nil {
-		return fmt.Errorf("open service: %w", err)
-	}
-	defer func() {
-		if err := s.Close(); err != nil {
-			logger.Warn("stopService", "service close error", "error", err)
-		}
-	}()
-
-	status, err := s.Query()
-	if err != nil {
-		return fmt.Errorf("query service status: %w", err)
-	}
-
-	if status.State == svc.Stopped {
-		return nil
-	}
-
-	if status.State != svc.Running {
-		return fmt.Errorf("service not running (current state: %v)", status.State)
-	}
-
-	_, err = s.Control(svc.Stop)
-	if err != nil {
-		return fmt.Errorf("send stop control: %w", err)
-	}
-
-	deadline := time.Now().Add(timeout)
-
-	for time.Now().Before(deadline) {
-		status, err = s.Query()
-		if err != nil {
-			return fmt.Errorf("query during stop: %w", err)
-		}
-
-		if status.State == svc.Stopped {
-			return nil
-		}
-
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	return fmt.Errorf("timeout waiting for service to stop")
-}
-
-const (
-	firewallName       = "Win Power Control Service"
-	NetFwActionAllow   = 1
-	NetFwRuleDirIn     = 1
-	NetFwProfileAll    = 0x7fffffff
-	NetFwIpProtocolAny = 256
-)
-
-func withFwPolicy2(f func(policy *ole.IDispatch, rules *ole.IDispatch) error) error {
-	if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
-		return fmt.Errorf("initialize COM: %w", err)
-	}
-	defer ole.CoUninitialize()
-
-	policyObj, err := oleutil.CreateObject("HNetCfg.FwPolicy2")
-	if err != nil {
-		return fmt.Errorf("create FwPolicy2: %w", err)
-	}
-	defer policyObj.Release()
-
-	policy, err := policyObj.QueryInterface(ole.IID_IDispatch)
-	if err != nil {
-		return fmt.Errorf("query IDispatch: %w", err)
-	}
-	defer policy.Release()
-
-	rulesRaw, err := oleutil.GetProperty(policy, "Rules")
-	if err != nil {
-		return fmt.Errorf("get Rules: %w", err)
-	}
-	rules := rulesRaw.ToIDispatch()
-	defer rules.Release()
-
-	return f(policy, rules)
-}
-
-func installService() {
-	exe, err := os.Executable()
-	if err != nil {
-		logger.Fatal("install", "resolve executable", "error", err)
-	}
-
-	m, err := mgr.Connect()
-	if err != nil {
-		logger.Fatal("install", "connect to SCM", "error", err)
-	}
-	defer func() {
-		if err := m.Disconnect(); err != nil {
-			logger.Warn("install", "SCM disconnect error", "error", err)
-		}
-	}()
-
-	s, err := m.OpenService(serviceName)
-	if err == nil {
-		if err := s.Close(); err != nil {
-			logger.Warn("install", "service close error", "error", err)
-		}
-		logger.Info("install", "service already installed")
+func requireAdmin() {
+	if windows.GetCurrentProcessToken().IsElevated() {
 		return
 	}
-
-	s, err = m.CreateService(serviceName, exe, mgr.Config{
-		DisplayName: "Win Power Control",
-		StartType:   mgr.StartAutomatic,
-	})
-	if err != nil {
-		logger.Fatal("install", "create service", "error", err)
-	}
-	defer func() {
-		if err := s.Close(); err != nil {
-			logger.Warn("install", "service close error", "error", err)
-		}
-	}()
-
-	logger.Info("install", "service installed")
-
-	if err := runServiceSC(); err != nil {
-		logger.Error("install", "failed to start service", "error", err)
-	}
-
-	logger.Info("install", "service started")
-
-	if err := excludeFromFirewall(); err != nil {
-		logger.Error("install", "failed to exclude from firewall", "error", err)
-	}
-
-	logger.Info("install", "firewall rule added")
-}
-
-func uninstallService() {
-	m, err := mgr.Connect()
-	if err != nil {
-		logger.Fatal("uninstall", "connect to SCM", "error", err)
-	}
-	defer func() {
-		if err := m.Disconnect(); err != nil {
-			logger.Warn("uninstall", "SCM disconnect error", "error", err)
-		}
-	}()
-
-	s, err := m.OpenService(serviceName)
-	if err != nil {
-		logger.Fatal("uninstall", "service not installed")
-	}
-	defer func() {
-		if err := s.Close(); err != nil {
-			logger.Warn("uninstall", "service close error", "error", err)
-		}
-	}()
-
-	if err := stopService(serviceName, 10*time.Second); err != nil {
-		logger.Error("uninstall", "failed to stop service", "error", err)
-	} else {
-		logger.Info("uninstall", "service stopped")
-	}
-	if err := s.Delete(); err != nil {
-		logger.Fatal("uninstall", "delete service", "error", err)
-	}
-
-	logger.Info("uninstall", "service deleted")
-
-	if err := removeFirewallRule(); err != nil {
-		logger.Error("uninstall", "failed to remove firewall rule", "error", err)
-	} else {
-		logger.Info("uninstall", "firewall rule removed")
-	}
-}
-
-func excludeFromFirewall() error {
-	appPath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve executable path: %w", err)
-	}
-
-	return withFwPolicy2(func(policy, rules *ole.IDispatch) error {
-		_, _ = oleutil.CallMethod(rules, "Remove", firewallName)
-
-		ruleObj, err := oleutil.CreateObject("HNetCfg.FWRule")
-		if err != nil {
-			return fmt.Errorf("create FWRule: %w", err)
-		}
-		defer ruleObj.Release()
-
-		rule, err := ruleObj.QueryInterface(ole.IID_IDispatch)
-		if err != nil {
-			return fmt.Errorf("query FWRule IDispatch: %w", err)
-		}
-		defer rule.Release()
-
-		if _, err = oleutil.PutProperty(rule, "Name", firewallName); err != nil {
-			return err
-		}
-		if _, err = oleutil.PutProperty(rule, "ApplicationName", appPath); err != nil {
-			return err
-		}
-		if _, err = oleutil.PutProperty(rule, "Action", NetFwActionAllow); err != nil {
-			return err
-		}
-		if _, err = oleutil.PutProperty(rule, "Direction", NetFwRuleDirIn); err != nil {
-			return err
-		}
-		if _, err = oleutil.PutProperty(rule, "Enabled", true); err != nil {
-			return err
-		}
-		if _, err = oleutil.PutProperty(rule, "Profiles", NetFwProfileAll); err != nil {
-			return err
-		}
-		if _, err = oleutil.PutProperty(rule, "Protocol", NetFwIpProtocolAny); err != nil {
-			return err
-		}
-		if _, err = oleutil.CallMethod(rules, "Add", rule); err != nil {
-			return fmt.Errorf("add firewall rule: %w", err)
-		}
-		return nil
-	})
-}
-
-func removeFirewallRule() error {
-	return withFwPolicy2(func(policy, rules *ole.IDispatch) error {
-		_, err := oleutil.CallMethod(rules, "Remove", firewallName)
-		if err != nil {
-			return fmt.Errorf("firewall rule not found")
-		}
-		return nil
-	})
+	fmt.Fprintln(os.Stderr, "Administrator privileges required")
+	os.Exit(1)
 }

@@ -1,71 +1,93 @@
 # win-powerctl
 
-The laziest way to shut down your PC.
+HTTP service for remote system power control.
+
+## Features
+
+- Shutdown, restart, power off via HTTP API
+- Windows service support
+- Health check with DLL status
+- Structured logging with zerolog
+- Password authentication
+
+## Build
+
+### PowerShell (recommended)
+
+```powershell
+.\build.ps1
+```
+
+With custom MSVC path:
+
+```powershell
+.\build.ps1 -MSVCPath "C:\path\to\vcvarsall.bat"
+```
+
+Output will be in `dist/`:
+
+```
+dist/
+├── config.ini
+├── poweroff.dll
+└── win-powerctl.exe
+```
+
+### Go only (without DLL)
+
+```bash
+go build -o dist/win-powerctl.exe ./cmd/win-powerctl
+```
 
 ## Usage
 
-1. Clone the repository:
+1. Edit `config.ini`:
 
-   ```bash
-   git clone https://github.com/aliffatulmf/win-powerctl.git
-   ```
+```ini
+[server]
+host = 0.0.0.0
+port = 10125
 
-2. Navigate to the project directory:
+[auth]
+password = changeme
+```
 
-   ```bash
-   cd win-powerctl
-   ```
+2. Run:
 
-3. Build the project:
+```bash
+win-powerctl.exe
+```
 
-   ```bash
-   go build ./cmd/win-powerctl
-   ```
+## Commands
 
-4. Run the executable:
+| Command     | Description                       |
+| ----------- | --------------------------------- |
+| _(no args)_ | Run HTTP server                   |
+| `install`   | Install as Windows service        |
+| `uninstall` | Remove from Windows services      |
+| `start`     | Start the service                 |
+| `stop`      | Stop the service                  |
+| `restart`   | Restart the service               |
+| `service`   | Run as Windows service (internal) |
+| `version`   | Print version                     |
 
-   ```bash
-   ./win-powerctl
-   ```
+## API
 
-5. Flags:
-   - `install`
+| Endpoint                        | Description         |
+| ------------------------------- | ------------------- |
+| `GET /shutdown?auth=<password>` | Graceful shutdown   |
+| `GET /health`                   | Health check (JSON) |
 
-     Sets up the application as a Windows service.
+### Health Response
 
-     ```bash
-     ./win-powerctl install
-     ```
+```json
+{
+  "status": "ok",
+  "server": { "host": "0.0.0.0", "port": 10125 },
+  "poweroff": { "loaded": true }
+}
+```
 
-   - `uninstall`
+## Logs
 
-     Removes the application from the system as a service.
-
-     ```bash
-     ./win-powerctl uninstall
-     ```
-
-   - `service`
-
-     Runs the application in service mode.
-
-     ```bash
-     ./win-powerctl service
-     ```
-
-6. API Endpoints:
-   - `GET /shutdown`
-
-     Triggers a graceful system shutdown.
-
-     ```bash
-     curl http://localhost:10125/shutdown
-     ```
-
-   - `GET /health`
-
-     Checks the application's health status.
-
-     ```bash
-     curl http://localhost:10125/health
-     ```
+Logs are written to `logs/<date>.log` in plain text format.
