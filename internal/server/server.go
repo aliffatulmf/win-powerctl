@@ -20,12 +20,13 @@ type Server struct {
 	mux      *http.ServeMux
 	srv      *http.Server
 	once     sync.Once
+	stop     chan struct{}
 	shutdown func() error
 	checkDLL func() error
 }
 
 func New(cfg *config.Config) *Server {
-	s := &Server{cfg: cfg}
+	s := &Server{cfg: cfg, stop: make(chan struct{})}
 	s.routes()
 	return s
 }
@@ -66,7 +67,15 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Graceful shutdown initiated"))
 
 	s.once.Do(func() {
-		go s.shutdown()
+		go func() {
+			logger.Info().Msg("gracefully stopping HTTP server")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			s.srv.Shutdown(ctx)
+
+			logger.Info().Msg("triggering system poweroff")
+			s.shutdown()
+		}()
 	})
 }
 
@@ -126,7 +135,7 @@ func (s *Server) Run(stop <-chan struct{}, errCh chan<- error) {
 
 	go func() {
 		<-stop
-		logger.Info().Msg("shutting down HTTP server")
+		logger.Info().Msg("service stop received, shutting down HTTP server")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		s.srv.Shutdown(ctx)
