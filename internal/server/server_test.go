@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -78,49 +78,79 @@ func TestHandleHealth_NoCheckFunc(t *testing.T) {
 	assert.Equal(t, "degraded", resp.Status)
 }
 
-func TestHandleShutdown_MethodNotAllowed(t *testing.T) {
-	s := newTestServer()
-	req := httptest.NewRequest("POST", "/shutdown", nil)
-	w := httptest.NewRecorder()
+func TestHandleShutdown(t *testing.T) {
+	tests := []struct {
+		name     string
+		method   string
+		auth     string
+		password string
+		wantCode int
+		wantBody string
+	}{
+		{
+			name:     "valid password",
+			method:   "GET",
+			auth:     "testpass",
+			password: "testpass",
+			wantCode: http.StatusOK,
+			wantBody: "Graceful shutdown initiated",
+		},
+		{
+			name:     "wrong password",
+			method:   "GET",
+			auth:     "wrong",
+			password: "testpass",
+			wantCode: http.StatusUnauthorized,
+		},
+		{
+			name:     "no password",
+			method:   "GET",
+			auth:     "",
+			password: "testpass",
+			wantCode: http.StatusUnauthorized,
+		},
+		{
+			name:     "empty password config",
+			method:   "GET",
+			auth:     "",
+			password: "",
+			wantCode: http.StatusUnauthorized,
+		},
+		{
+			name:     "method not allowed",
+			method:   "POST",
+			auth:     "testpass",
+			password: "testpass",
+			wantCode: http.StatusMethodNotAllowed,
+		},
+	}
 
-	s.handleShutdown(w, req)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Host:     "127.0.0.1",
+				Port:     0,
+				Password: tt.password,
+			}
+			s := New(cfg)
+			s.SetShutdown(func() error { return nil })
+			s.SetCheckDLL(func() error { return nil })
 
-	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
-}
+			url := "/shutdown"
+			if tt.auth != "" {
+				url += "?auth=" + tt.auth
+			}
+			req := httptest.NewRequest(tt.method, url, nil)
+			w := httptest.NewRecorder()
 
-func TestHandleShutdown_InvalidPassword(t *testing.T) {
-	s := newTestServer()
-	req := httptest.NewRequest("GET", "/shutdown?auth=wrong", nil)
-	w := httptest.NewRecorder()
+			s.handleShutdown(w, req)
 
-	s.handleShutdown(w, req)
+			assert.Equal(t, tt.wantCode, w.Code)
+			if tt.wantBody != "" {
+				assert.Contains(t, w.Body.String(), tt.wantBody)
+			}
 
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
-}
-
-func TestHandleShutdown_ValidPassword(t *testing.T) {
-	var called atomic.Bool
-	s := newTestServer()
-	s.SetShutdown(func() error {
-		called.Store(true)
-		return nil
-	})
-
-	req := httptest.NewRequest("GET", "/shutdown?auth=testpass", nil)
-	w := httptest.NewRecorder()
-
-	s.handleShutdown(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "Graceful shutdown initiated")
-}
-
-func TestHandleShutdown_NoPassword(t *testing.T) {
-	s := newTestServer()
-	req := httptest.NewRequest("GET", "/shutdown", nil)
-	w := httptest.NewRecorder()
-
-	s.handleShutdown(w, req)
-
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
+			time.Sleep(10 * time.Millisecond)
+		})
+	}
 }

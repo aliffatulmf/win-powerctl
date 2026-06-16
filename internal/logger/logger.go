@@ -8,7 +8,10 @@ import (
 	"github.com/rs/zerolog"
 )
 
-var log zerolog.Logger
+var (
+	log     zerolog.Logger
+	logFile *os.File
+)
 
 func Init() {
 	os.MkdirAll("logs", 0755)
@@ -19,12 +22,20 @@ func Init() {
 		fmt.Fprintf(os.Stderr, "failed to open log file: %v\n", err)
 		os.Exit(1)
 	}
+	logFile = f
 
 	console := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: "15:04:05"}
 	file := zerolog.ConsoleWriter{Out: f, TimeFormat: "15:04:05", NoColor: true}
 
 	multi := zerolog.MultiLevelWriter(console, file)
 	log = zerolog.New(multi).With().Timestamp().Logger()
+}
+
+func Close() {
+	if logFile != nil {
+		logFile.Close()
+		logFile = nil
+	}
 }
 
 func Info() *zerolog.Event  { return log.Info() }

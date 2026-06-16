@@ -68,10 +68,12 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 
 	s.once.Do(func() {
 		go func() {
-			logger.Info().Msg("gracefully stopping HTTP server")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			s.srv.Shutdown(ctx)
+			if s.srv != nil {
+				logger.Info().Msg("gracefully stopping HTTP server")
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				s.srv.Shutdown(ctx)
+			}
 
 			logger.Info().Msg("triggering system poweroff")
 			s.shutdown()
